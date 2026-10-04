@@ -1,31 +1,94 @@
 ---
-title: "PGA Tour Momentum"
+title: "PGA Tour Momentum Project"
 format: html
 editor: visual
 ---
 
+
+## Inspect the raw data
+
+```{r}
+results <- readRDS("holes_2025_raw.rds")
+
+# Number of events and events with no data
+length(results)
+
+failed <- names(results)[
+  sapply(results, function(x) is.null(x) || nrow(x) == 0)
+]
+failed
+```
+
+### Example: The Sentry
+
+Each row records one player's score on one hole in one round.
+
+```{r}
+holes <- results[["The Sentry"]]
+
+dim(holes)
+names(holes)
+head(holes)
+str(holes)
+```
+
+### Check incomplete rounds
+
+```{r}
+library(DBI)
+library(RSQLite)
+
+# Use a temporary database to inspect the raw event
+inspection_con <- dbConnect(SQLite(), ":memory:")
+dbWriteTable(inspection_con, "holes", holes)
+
+dbGetQuery(inspection_con, "
+  SELECT player_id, player_name, round, COUNT(*) AS n_holes
+  FROM holes
+  GROUP BY player_id, player_name, round
+  HAVING COUNT(*) != 18
+")
+```
+
+Davis Riley's fourth round contains nine recorded holes, numbered 10–18.
+This may reflect a withdrawal or missing data; the hole records alone
+do not establish the cause.
+
+```{r}
+dbGetQuery(inspection_con, "
+  SELECT player_name, hole, par, score
+  FROM holes
+  WHERE player_id = '10058' AND round = 4
+  ORDER BY hole
+")
+
+dbDisconnect(inspection_con)
+```
+
 ## Build the database
 
-R reads the saved golfastr responses and imports them into SQLite. Filtering,
-course proxies, previous-hole features, and difficulty controls are computed in
-`sql/analysis.sql`. Python can later query the same `analysis` view for modeling.
+R reads the saved golfastr responses and imports them into SQLite. Filtering, course proxies, previous-hole features, and difficulty controls are computed in `sql/analysis.sql`. Python can later query the same `analysis` view for modeling.
 
 ```{r}
 source("02_build_database.R")
-con <- DBI::dbConnect(RSQLite::SQLite(), "pga_2025.sqlite")
+con <- dbConnect(RSQLite::SQLite(), "pga_2025.sqlite")
+
+
+results <- readRDS("holes_2025_raw.rds")
+
 ```
 
 ## Check round sizes and extra rounds
 
 ```{r}
-DBI::dbGetQuery(con, "
+dbGetQuery(con, "
   SELECT n_holes, COUNT(*) AS n_player_rounds
   FROM (
     SELECT event_query, round, player_id, COUNT(*) AS n_holes
     FROM clean GROUP BY event_query, round, player_id
   ) GROUP BY n_holes ORDER BY n_player_rounds DESC LIMIT 20
 ")
-DBI::dbGetQuery(con, "
+dbGetQuery(con, "
   SELECT event_query, round, COUNT(*) AS n_rows
   FROM clean WHERE round = 5 GROUP BY event_query, round
 ")
@@ -38,12 +101,12 @@ share the same par sequence, so this is only a proxy. Eligibility preserves the
 original 18-row rule; this additional check flags duplicate or missing holes.
 
 ```{r}
-DBI::dbGetQuery(con, "
+dbGetQuery(con, "
   SELECT event_query, round, COUNT(DISTINCT course_key) AS n_courses
   FROM round_courses GROUP BY event_query, round
   HAVING COUNT(DISTINCT course_key) > 1 ORDER BY event_query, round
 ")
-DBI::dbGetQuery(con, "
+dbGetQuery(con, "
   SELECT event_query, round, player_id
   FROM complete_rounds GROUP BY event_query, round, player_id
   HAVING COUNT(DISTINCT hole) != 18 OR MIN(hole) != 1 OR MAX(hole) != 18
@@ -59,7 +122,7 @@ starts. `hole_diff` excludes the current player's score; `player_skill` excludes
 the current event. Undefined controls are SQL NULL via `NULLIF`.
 
 ```{r}
-DBI::dbGetQuery(con, "
+dbGetQuery(con, "
   SELECT COUNT(*) AS n_holes,
     SUM(prev_to_par IS NULL) AS missing_previous,
     SUM(hole_diff IS NULL) AS missing_hole_diff,
@@ -68,7 +131,7 @@ DBI::dbGetQuery(con, "
     MIN(player_skill) AS min_player_skill, MAX(player_skill) AS max_player_skill
   FROM analysis
 ")
-DBI::dbGetQuery(con, "
+dbGetQuery(con, "
   SELECT prev_birdie, COUNT(*) AS n, AVG(to_par) AS mean_next
   FROM analysis WHERE prev_birdie IS NOT NULL
   GROUP BY prev_birdie ORDER BY prev_birdie
@@ -78,14 +141,14 @@ DBI::dbGetQuery(con, "
 ## Validate score labels
 
 ```{r}
-DBI::dbGetQuery(con, "
+dbGetQuery(con, "
   SELECT score_type, COUNT(*) AS n FROM analysis GROUP BY score_type
 ")
-DBI::dbGetQuery(con, "
+dbGetQuery(con, "
   SELECT score, par, score_type, COUNT(*) AS n
   FROM analysis WHERE to_par <= -3 GROUP BY score, par, score_type
 ")
-DBI::dbGetQuery(con, "
+dbGetQuery(con, "
   WITH checked AS (
     SELECT *, CASE
       WHEN score_type = 'OTHER' THEN to_par < 4
@@ -100,5 +163,5 @@ DBI::dbGetQuery(con, "
   FROM checked GROUP BY event_query, round
   HAVING SUM(mismatch) > 0 ORDER BY bad DESC LIMIT 30
 ")
-DBI::dbDisconnect(con)
+dbDisconnect(con)
 ```

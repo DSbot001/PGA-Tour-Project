@@ -10,12 +10,17 @@ SELECT * FROM all_holes WHERE event_query NOT IN (
  'Zurich Classic of New Orleans',
  'PGA TOUR Q-School presented by Korn Ferry', 'Hero World Challenge'
 );
+
+
 -- Preserve the original rule: 18 rows, round <= 4.
 CREATE VIEW complete_rounds AS
 SELECT * FROM (
  SELECT *, COUNT(*) OVER (PARTITION BY event_query, round, player_id) AS n_holes
  FROM clean WHERE round <= 4
 ) WHERE n_holes = 18;
+
+
+
 -- Par sequence is a course proxy, not a guaranteed unique course ID.
 CREATE VIEW round_courses AS
 SELECT DISTINCT event_query, round, player_id,
@@ -29,6 +34,9 @@ SELECT h.*, c.course_key, h.score - h.par AS to_par,
  CASE WHEN h.hole <= 9 THEN 1 ELSE 2 END AS nine
 FROM complete_rounds h JOIN round_courses c
  ON h.event_query = c.event_query AND h.round = c.round AND h.player_id = c.player_id;
+
+
+
 -- Preserve the original reset at holes 1 and 10.
 CREATE VIEW lagged_holes AS
 SELECT *, LAG(to_par) OVER (
