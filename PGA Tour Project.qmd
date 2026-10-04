@@ -1,9 +1,25 @@
 ---
 title: "PGA Tour Momentum Project"
-format: html
+format:
+  html:
+    code-fold: true
 editor: visual
 ---
 
+
+## Why this project?
+
+As a college golfer, I am interested in whether the feeling of momentum during a round shows up in the data. A birdie can feel like a turning point, but the next hole may also be easier, or the player may simply be playing well that day.
+
+This project asks: **is making a birdie or better associated with a better score on the next hole, after accounting for player ability and hole difficulty?** The aim is to study that association, rather than assume it is evidence of a psychological effect.
+
+## Data and a little golf background
+
+I use 2025 PGA Tour hole-level data retrieved through the R package `golfastr`, using `load_leaderboard()` to identify events and `load_holes()` to retrieve their hole records. The saved responses are in `holes_2025_raw.rds`, so the analysis does not need to download them again.
+
+Each row represents one player's score on one hole in one tournament round. A round normally has 18 holes. **Par** is the reference number of strokes for a hole; a **birdie** is one stroke below par, and an **eagle** is two below. Lower scores are better. For example, a score of 3 on a par-4 hole is a birdie.
+
+R loads the data into SQLite, SQL prepares the analysis variables, and Python modeling is the next step. The sections below check the data and prepare those variables; they do not yet provide an adjusted estimate of momentum.
 
 ## Inspect the raw data
 
@@ -27,9 +43,7 @@ Each row records one player's score on one hole in one round.
 holes <- results[["The Sentry"]]
 
 dim(holes)
-names(holes)
-head(holes)
-str(holes)
+head(holes)  # A few rows are enough to show the structure
 ```
 
 ### Check incomplete rounds
@@ -71,14 +85,13 @@ R reads the saved golfastr responses and imports them into SQLite. Filtering, co
 
 ```{r}
 source("02_build_database.R")
-con <- dbConnect(RSQLite::SQLite(), "pga_2025.sqlite")
-
-
-results <- readRDS("holes_2025_raw.rds")
+con <- dbConnect(SQLite(), "pga_2025.sqlite")
 
 ```
 
 ## Check round sizes and extra rounds
+
+A player can withdraw before finishing a round, and data can also be missing. The first table counts how many player-rounds have each number of recorded holes across the included events. The second checks records labeled as round 5. Our current sample keeps rounds 1–4 with 18 recorded rows; other complete rounds from the same player remain eligible.
 
 ```{r}
 dbGetQuery(con, "
@@ -96,9 +109,9 @@ dbGetQuery(con, "
 
 ## Check course proxies
 
-The course key concatenates pars in hole-number order. Different courses can
-share the same par sequence, so this is only a proxy. Eligibility preserves the
-original 18-row rule; this additional check flags duplicate or missing holes.
+Some events use more than one course. We use the sequence of pars from holes 1–18 as a rough course identifier, so players on different layouts are not automatically compared as if they played the same hole. Different courses can share this sequence, so it is an imperfect proxy.
+
+The first query finds event-rounds with multiple par sequences. The second checks whether an 18-row player-round actually contains holes 1–18 without duplicates. This check reports problems; it does not remove them automatically.
 
 ```{r}
 dbGetQuery(con, "
@@ -139,6 +152,8 @@ dbGetQuery(con, "
 ```
 
 ## Validate score labels
+
+Finally, we compare the recorded labels with `score - par`. For example, a row labeled BIRDIE should have a value of −1. The last query lists event-rounds with label mismatches for further inspection.
 
 ```{r}
 dbGetQuery(con, "
