@@ -128,11 +128,15 @@ dbGetQuery(con, "
 
 ## Analysis features
 
-`prev_birdie` means birdie **or better**, matching the original `<= -1` rule.
-The lag resets at each nine, so holes 1 and 10 have no previous-hole value.
-This uses hole-number order, not verified playing order for shotgun or split-tee
-starts. `hole_diff` excludes the current player's score; `player_skill` excludes
-the current event. Undefined controls are SQL NULL via `NULLIF`.
+We calculate each score relative to par: `to_par = score - par`. A birdie is −1, par is 0, and a bogey is +1.
+
+- `prev_birdie`: whether the preceding hole was a birdie or better, including eagles.
+- `hole_diff`: the other players' average score relative to par on the same event-round, course proxy, and hole. Lower values suggest an easier hole.
+- `player_skill`: the player's average score relative to par in the other included events. Lower values suggest better scoring, though this is a rough measure rather than a full ability estimate.
+
+For now, consecutive-hole comparisons stay within each nine, so holes 1 and 10 have no previous-hole value. Hole-number order is not always actual playing order; this rule avoids connecting the two nines but also omits valid transitions between them. A control is left missing when there are no other observations to calculate it from.
+
+The first query checks sample size and missing controls. The second is a simple, unadjusted comparison of next-hole scores. Differences here could still reflect the players or holes involved.
 
 ```{r}
 dbGetQuery(con, "
