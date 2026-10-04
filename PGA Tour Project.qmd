@@ -4,155 +4,101 @@ format: html
 editor: visual
 ---
 
-## Load saved data
+## Build the database
 
-
-
-```{r}
-library(dplyr)
-
-results <- readRDS("holes_2025_raw.rds")
-all_holes <- bind_rows(results, .id = "event_query")
-
-exclude <- c("Zurich Classic of New Orleans",
-             "PGA TOUR Q-School presented by Korn Ferry",
-             "Hero World Challenge")
-
-clean <- all_holes |> filter(!event_query %in% exclude)
-
-par_seq <- clean |>
-  arrange(player_id, tournament_id, round, hole) |>
-  group_by(event_query, round, player_id) |>
-  summarise(seq = paste(par, collapse = ""), .groups = "drop")
-
-multi <- par_seq |>
-  group_by(event_query, round) |>
-  summarise(n_courses = n_distinct(seq), .groups = "drop") |>
-  filter(n_courses > 1)
-
-print(multi, n = Inf)
-nrow(multi)
-```
-```{r}
-clean |>
-  count(event_query, round, player_id, name = "n_holes") |>
-  count(n_holes, name = "n_player_rounds") |>
-  arrange(desc(n_player_rounds)) |>
-  print(n = 20)
-
-clean |>
-  filter(round == 5) |>
-  count(event_query, round, name = "n_rows")
-
-
-```
+R reads the saved golfastr responses and imports them into SQLite. Filtering,
+course proxies, previous-hole features, and difficulty controls are computed in
+`sql/analysis.sql`. Python can later query the same `analysis` view for modeling.
 
 ```{r}
-complete_rounds <- clean |>
-  filter(round <= 4) |>
-  group_by(event_query, round, player_id) |>
-  filter(n() == 18) |>
-  ungroup()
-
-nrow(complete_rounds)
-
-complete_rounds |>
-  arrange(player_id, tournament_id, round, hole) |>
-  group_by(event_query, round, player_id) |>
-  summarise(seq = paste(par, collapse = ""), .groups = "drop") |>
-  group_by(event_query, round) |>
-  summarise(n_courses = n_distinct(seq), .groups = "drop") |>
-  filter(n_courses > 1) |>
-  print(n = Inf)
-
-
-complete_rounds <- complete_rounds |>
-  group_by(event_query, round, player_id) |>
-  mutate(course_key = paste(par, collapse = "")) |>
-  ungroup()
+source("02_build_database.R")
+con <- DBI::dbConnect(RSQLite::SQLite(), "pga_2025.sqlite")
 ```
 
+## Check round sizes and extra rounds
 
 ```{r}
-library(dplyr)
-
-analysis <- complete_rounds |>
-  group_by(event_query, round, player_id) |>
-  mutate(course_key = paste(par, collapse = "")) |>
-  ungroup() |>
-  mutate(to_par = score - par,
-         nine = if_else(hole <= 9, 1L, 2L))
+DBI::dbGetQuery(con, "
+  SELECT n_holes, COUNT(*) AS n_player_rounds
+  FROM (
+    SELECT event_query, round, player_id, COUNT(*) AS n_holes
+    FROM clean GROUP BY event_query, round, player_id
+  ) GROUP BY n_holes ORDER BY n_player_rounds DESC LIMIT 20
+")
+DBI::dbGetQuery(con, "
+  SELECT event_query, round, COUNT(*) AS n_rows
+  FROM clean WHERE round = 5 GROUP BY event_query, round
+")
 ```
+
+## Check course proxies
+
+The course key concatenates pars in hole-number order. Different courses can
+share the same par sequence, so this is only a proxy. Eligibility preserves the
+original 18-row rule; this additional check flags duplicate or missing holes.
 
 ```{r}
-analysis <- analysis |>
-  arrange(player_id, tournament_id, round, hole) |>
-  group_by(player_id, tournament_id, round, nine) |>
-  mutate(prev_to_par = lag(to_par, order_by = hole),
-         prev_birdie = as.integer(prev_to_par <= -1)) |>
-  ungroup()
-
-sum(is.na(analysis$prev_to_par))
-nrow(analysis)
+DBI::dbGetQuery(con, "
+  SELECT event_query, round, COUNT(DISTINCT course_key) AS n_courses
+  FROM round_courses GROUP BY event_query, round
+  HAVING COUNT(DISTINCT course_key) > 1 ORDER BY event_query, round
+")
+DBI::dbGetQuery(con, "
+  SELECT event_query, round, player_id
+  FROM complete_rounds GROUP BY event_query, round, player_id
+  HAVING COUNT(DISTINCT hole) != 18 OR MIN(hole) != 1 OR MAX(hole) != 18
+")
 ```
+
+## Analysis features
+
+`prev_birdie` means birdie **or better**, matching the original `<= -1` rule.
+The lag resets at each nine, so holes 1 and 10 have no previous-hole value.
+This uses hole-number order, not verified playing order for shotgun or split-tee
+starts. `hole_diff` excludes the current player's score; `player_skill` excludes
+the current event. Undefined controls are SQL NULL via `NULLIF`.
 
 ```{r}
-analysis <- analysis |>
-  group_by(event_query, round, course_key, hole) |>
-  mutate(n_field = n(),
-         hole_diff = (sum(to_par) - to_par) / (n_field - 1)) |>
-  ungroup()
-
-analysis <- analysis |>
-  group_by(player_id) |>
-  mutate(tot_sum = sum(to_par), tot_n = n()) |>
-  group_by(player_id, event_query) |>
-  mutate(player_skill = (tot_sum - sum(to_par)) / (tot_n - n())) |>
-  ungroup()
+DBI::dbGetQuery(con, "
+  SELECT COUNT(*) AS n_holes,
+    SUM(prev_to_par IS NULL) AS missing_previous,
+    SUM(hole_diff IS NULL) AS missing_hole_diff,
+    SUM(player_skill IS NULL) AS missing_player_skill,
+    MIN(hole_diff) AS min_hole_diff, MAX(hole_diff) AS max_hole_diff,
+    MIN(player_skill) AS min_player_skill, MAX(player_skill) AS max_player_skill
+  FROM analysis
+")
+DBI::dbGetQuery(con, "
+  SELECT prev_birdie, COUNT(*) AS n, AVG(to_par) AS mean_next
+  FROM analysis WHERE prev_birdie IS NOT NULL
+  GROUP BY prev_birdie ORDER BY prev_birdie
+")
 ```
 
+## Validate score labels
 
 ```{r}
-summary(analysis$hole_diff)
-summary(analysis$player_skill)
-sum(is.infinite(analysis$player_skill) | is.nan(analysis$player_skill))
-
-
-analysis |>
-  filter(!is.na(prev_birdie)) |>
-  group_by(prev_birdie) |>
-  summarise(n = n(), mean_next = mean(to_par))
+DBI::dbGetQuery(con, "
+  SELECT score_type, COUNT(*) AS n FROM analysis GROUP BY score_type
+")
+DBI::dbGetQuery(con, "
+  SELECT score, par, score_type, COUNT(*) AS n
+  FROM analysis WHERE to_par <= -3 GROUP BY score, par, score_type
+")
+DBI::dbGetQuery(con, "
+  WITH checked AS (
+    SELECT *, CASE
+      WHEN score_type = 'OTHER' THEN to_par < 4
+      ELSE to_par != CASE score_type
+        WHEN 'DOUBLE_EAGLE' THEN -3 WHEN 'EAGLE' THEN -2
+        WHEN 'BIRDIE' THEN -1 WHEN 'PAR' THEN 0 WHEN 'BOGEY' THEN 1
+        WHEN 'DOUBLE_BOGEY' THEN 2 WHEN 'TRIPLE_BOGEY' THEN 3
+      END
+    END AS mismatch FROM analysis
+  )
+  SELECT event_query, round, SUM(mismatch) AS bad, COUNT(*) AS total
+  FROM checked GROUP BY event_query, round
+  HAVING SUM(mismatch) > 0 ORDER BY bad DESC LIMIT 30
+")
+DBI::dbDisconnect(con)
 ```
-
-```{r}
-summary(analysis$score)
-table(analysis$score_type, useNA = "ifany")
-
-analysis |>
-  filter(to_par <= -3) |>
-  count(score, par, score_type)
-```
-
-
-```{r}
-label_to_par <- c(DOUBLE_EAGLE = -3, EAGLE = -2, BIRDIE = -1, PAR = 0,
-                  BOGEY = 1, DOUBLE_BOGEY = 2, TRIPLE_BOGEY = 3)
-
-check <- analysis |>
-  mutate(expected = label_to_par[score_type],
-         mismatch = case_when(
-           score_type == "OTHER" ~ (score - par) < 4,
-           TRUE ~ (score - par) != expected))
-
-sum(check$mismatch)
-
-check |>
-  group_by(event_query, round) |>
-  summarise(bad = sum(mismatch), total = n(), .groups = "drop") |>
-  filter(bad > 0) |>
-  arrange(desc(bad)) |>
-  print(n = 30)
-```
-
-
-
