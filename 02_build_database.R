@@ -11,14 +11,14 @@ message("Events with no data: ", if (length(failed)) paste(failed, collapse = ",
 # Stack all events into one table; failed events are skipped automatically
 all_holes <- bind_rows(results, .id = "event_query")
 
-con <- dbConnect(SQLite(), "pga_2025.sqlite")
-dbWriteTable(con, "all_holes", all_holes, overwrite = TRUE)
+pga_db <- dbConnect(SQLite(), "pga_2025.sqlite")
+dbWriteTable(pga_db, "all_holes", all_holes, overwrite = TRUE)
 
 # dbExecute runs one statement at a time, so split the SQL file on semicolons
-sql <- paste(readLines("sql/analysis.sql"), collapse = "\n")
+sql <- paste(readLines("analysis.sql"), collapse = "\n")
 for (statement in strsplit(sql, ";")[[1]]) {
-  if (nzchar(trimws(statement))) dbExecute(con, statement)
+  if (nzchar(trimws(statement))) dbExecute(pga_db, statement)
 }
 
-dbGetQuery(con, "SELECT COUNT(*) AS n_holes FROM analysis")
-dbDisconnect(con)
+dbGetQuery(pga_db, "SELECT COUNT(*) AS n_holes FROM analysis")
+dbDisconnect(pga_db)

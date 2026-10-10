@@ -3,89 +3,44 @@ title: "PGA Tour Momentum Project"
 format:
   html:
     code-fold: true
-editor: visual
+editor: source
 ---
 
+## The Purpose of the Project
 
-## Why this project?
-
-As a college golfer, I am interested in whether the feeling of momentum during a round shows up in the data. A birdie can feel like a turning point, but the next hole may also be easier, or the player may simply be playing well that day.
-
-This project asks: **is making a birdie or better associated with a better score on the next hole, after accounting for player ability and hole difficulty?** The aim is to study that association, rather than assume it is evidence of a psychological effect.
+As a ncaa d1 college golfer, I was interested in whether the momentum / hot hand feeling during a round actually shows up in the data. A birdie feels like it should carry over. But maybe the next hole is just easier, or the player is simply having a good day. Our Research Question: **Is making a birdie or better associated with a better score on the next hole, after accounting for player ability and hole difficulty?** 
 
 ## Data and a little golf background
 
-I use 2025 PGA Tour hole-level data retrieved through the R package `golfastr`, using `load_leaderboard()` to identify events and `load_holes()` to retrieve their hole records. The saved responses are in `holes_2025_raw.rds`, so the analysis does not need to download them again.
+The 2025 PGA Tour hole-level data was retrieved through the R package `golfastr`, using `load_leaderboard()` to identify events and `load_holes()` to retrieve their hole records. The saved dataframes are in `holes_2025_raw.rds`, so the analysis does not need to download them again.
 
-Each row represents one player's score on one hole in one tournament round. A round normally has 18 holes. **Par** is the reference number of strokes for a hole; a **birdie** is one stroke below par, and an **eagle** is two below. Lower scores are better. For example, a score of 3 on a par-4 hole is a birdie.
+Each row represents one player's score on one hole in one tournament round. A round normally has 18 holes. Par is the reference number of strokes for a hole. The labels below describe a player's score relative to par. Lower scores are better.
+
+| Score label | Strokes relative to par | Example on a par-5 hole |
+|---|---:|---:|
+| Double eagle (albatross) | −3 | 2 |
+| Eagle | −2 | 3 |
+| Birdie | −1 | 4 |
+| Par | 0 | 5 |
+| Bogey | +1 | 6 |
+| Double bogey | +2 | 7 |
+| Triple bogey | +3 | 8 |
+| Other | A separate category checked against the recorded score | — |
+
+For the analysis, we calculate `to_par = score - par` directly from the numeric scores.
 
 R loads the data into SQLite, SQL prepares the analysis variables, and Python modeling is the next step. The sections below check the data and prepare those variables; they do not yet provide an adjusted estimate of momentum.
 
-## Inspect the raw data
-
-```{r}
-results <- readRDS("holes_2025_raw.rds")
-
-# Number of events and events with no data
-length(results)
-
-failed <- names(results)[
-  sapply(results, function(x) is.null(x) || nrow(x) == 0)
-]
-failed
-```
-
-### Example: The Sentry
-
-Each row records one player's score on one hole in one round.
-
-```{r}
-holes <- results[["The Sentry"]]
-
-dim(holes)
-head(holes)  # A few rows are enough to show the structure
-```
-
-### Check incomplete rounds
-
-```{r}
-library(DBI)
-library(RSQLite)
-
-# Use a temporary database to inspect the raw event
-inspection_con <- dbConnect(SQLite(), ":memory:")
-dbWriteTable(inspection_con, "holes", holes)
-
-dbGetQuery(inspection_con, "
-  SELECT player_id, player_name, round, COUNT(*) AS n_holes
-  FROM holes
-  GROUP BY player_id, player_name, round
-  HAVING COUNT(*) != 18
-")
-```
-
-Davis Riley's fourth round contains nine recorded holes, numbered 10–18.
-This may reflect a withdrawal or missing data; the hole records alone
-do not establish the cause.
-
-```{r}
-dbGetQuery(inspection_con, "
-  SELECT player_name, hole, par, score
-  FROM holes
-  WHERE player_id = '10058' AND round = 4
-  ORDER BY hole
-")
-
-dbDisconnect(inspection_con)
-```
 
 ## Build the database
 
 R reads the saved golfastr responses and imports them into SQLite. Filtering, course proxies, previous-hole features, and difficulty controls are computed in `sql/analysis.sql`. Python can later query the same `analysis` view for modeling.
 
 ```{r}
-source("02_build_database.R")
-con <- dbConnect(SQLite(), "pga_2025.sqlite")
+library(DBI)
+library(RSQLite)
+
+pga_db <- dbConnect(SQLite(), "pga_2025.sqlite")
 
 ```
 
@@ -94,14 +49,14 @@ con <- dbConnect(SQLite(), "pga_2025.sqlite")
 A player can withdraw before finishing a round, and data can also be missing. The first table counts how many player-rounds have each number of recorded holes across the included events. The second checks records labeled as round 5. Our current sample keeps rounds 1–4 with 18 recorded rows; other complete rounds from the same player remain eligible.
 
 ```{r}
-dbGetQuery(con, "
+dbGetQuery(pga_db, "
   SELECT n_holes, COUNT(*) AS n_player_rounds
   FROM (
     SELECT event_query, round, player_id, COUNT(*) AS n_holes
     FROM clean GROUP BY event_query, round, player_id
   ) GROUP BY n_holes ORDER BY n_player_rounds DESC LIMIT 20
 ")
-dbGetQuery(con, "
+dbGetQuery(pga_db, "
   SELECT event_query, round, COUNT(*) AS n_rows
   FROM clean WHERE round = 5 GROUP BY event_query, round
 ")
@@ -114,12 +69,12 @@ Some events use more than one course. We use the sequence of pars from holes 1�
 The first query finds event-rounds with multiple par sequences. The second checks whether an 18-row player-round actually contains holes 1–18 without duplicates. This check reports problems; it does not remove them automatically.
 
 ```{r}
-dbGetQuery(con, "
+dbGetQuery(pga_db, "
   SELECT event_query, round, COUNT(DISTINCT course_key) AS n_courses
   FROM round_courses GROUP BY event_query, round
   HAVING COUNT(DISTINCT course_key) > 1 ORDER BY event_query, round
 ")
-dbGetQuery(con, "
+dbGetQuery(pga_db, "
   SELECT event_query, round, player_id
   FROM complete_rounds GROUP BY event_query, round, player_id
   HAVING COUNT(DISTINCT hole) != 18 OR MIN(hole) != 1 OR MAX(hole) != 18
@@ -139,7 +94,7 @@ For now, consecutive-hole comparisons stay within each nine, so holes 1 and 10 h
 The first query checks sample size and missing controls. The second is a simple, unadjusted comparison of next-hole scores. Differences here could still reflect the players or holes involved.
 
 ```{r}
-dbGetQuery(con, "
+dbGetQuery(pga_db, "
   SELECT COUNT(*) AS n_holes,
     SUM(prev_to_par IS NULL) AS missing_previous,
     SUM(hole_diff IS NULL) AS missing_hole_diff,
@@ -148,7 +103,7 @@ dbGetQuery(con, "
     MIN(player_skill) AS min_player_skill, MAX(player_skill) AS max_player_skill
   FROM analysis
 ")
-dbGetQuery(con, "
+dbGetQuery(pga_db, "
   SELECT prev_birdie, COUNT(*) AS n, AVG(to_par) AS mean_next
   FROM analysis WHERE prev_birdie IS NOT NULL
   GROUP BY prev_birdie ORDER BY prev_birdie
@@ -160,14 +115,14 @@ dbGetQuery(con, "
 Finally, we compare the recorded labels with `score - par`. For example, a row labeled BIRDIE should have a value of −1. The last query lists event-rounds with label mismatches for further inspection.
 
 ```{r}
-dbGetQuery(con, "
+dbGetQuery(pga_db, "
   SELECT score_type, COUNT(*) AS n FROM analysis GROUP BY score_type
 ")
-dbGetQuery(con, "
+dbGetQuery(pga_db, "
   SELECT score, par, score_type, COUNT(*) AS n
   FROM analysis WHERE to_par <= -3 GROUP BY score, par, score_type
 ")
-dbGetQuery(con, "
+dbGetQuery(pga_db, "
   WITH checked AS (
     SELECT *, CASE
       WHEN score_type = 'OTHER' THEN to_par < 4
@@ -182,5 +137,5 @@ dbGetQuery(con, "
   FROM checked GROUP BY event_query, round
   HAVING SUM(mismatch) > 0 ORDER BY bad DESC LIMIT 30
 ")
-dbDisconnect(con)
+dbDisconnect(pga_db)
 ```
